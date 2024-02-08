@@ -1,0 +1,193 @@
+---
+title: "NYPD Shooting Data Analysis"
+author: "AG"
+date: "2024-01-10"
+output: html_document
+---
+
+## Data retrieval and cleaning
+The data we use in this report is public data from the city of new york and contains every reported shooting case in extensive and categorized detail. 
+First load the utilized packages into the program, then access the download link and read in the csv data. Then only select the "OCCUR_DATE" and "PERP_SEX" columns and begin data cleaning.
+We then generate aggregate tables from the raw data that we can use later. 
+
+
+```{r, results='hide', message=FALSE, warning=FALSE}
+library(tidyverse)
+library(lubridate)
+
+url_in <- "https://data.cityofnewyork.us/api/views/833y-fsy8/rows.csv?accessType=DOWNLOAD"
+
+NYPD_Shooting_data <- read_csv(url_in)
+```
+
+```{r}
+
+NYPD_Shooting_data <- select(NYPD_Shooting_data, c(OCCUR_DATE, PERP_SEX))
+
+NYPD_Shooting_data$OCCUR_DATE <- mdy(NYPD_Shooting_data$OCCUR_DATE)
+
+
+unique_values <- unique(NYPD_Shooting_data$PERP_SEX)
+print(unique_values)
+
+NYPD_Shooting_data <- NYPD_Shooting_data %>% mutate(PERP_SEX = ifelse(PERP_SEX %in% c("M", "F", "U"), PERP_SEX, "U"))
+
+NYPD_Shooting_data$PERP_SEX <- factor(NYPD_Shooting_data$PERP_SEX, levels = c("M", "F", "U"), ordered = FALSE)
+
+all_yearly_sex_data <- NYPD_Shooting_data%>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  group_by(year, PERP_SEX) %>%
+  summarise(total_cases = n())
+
+sum_cases_per_year <- NYPD_Shooting_data %>%
+  mutate(year = year(OCCUR_DATE)) %>%
+  group_by(year) %>%
+  summarise(total_cases = n())
+```
+
+## Analysis data and modeling
+* In this step we split the data into two periods, before and after the start of 2018. The goal of this document is to use the pre-2018 data to predict the number of cases per year after 2017. 
+The first step is to visualize the "analysis_data" in Fig.1 and show the number of cases per year for each value of "PERP_SEX"; 'Male', 'Female' and 'Unknown'.
+
+
+
+```{r}
+analysis_data <- sum_cases_per_year %>%
+  filter(year < 2018)
+
+yearly_sex_data <- all_yearly_sex_data %>%
+  filter(year < 2018)
+
+ggplot() +
+  geom_line(data = yearly_sex_data, aes(x=year, y=total_cases, color=PERP_SEX)) +
+  geom_line(data = analysis_data, aes(x=year, y=total_cases, color="All")) +
+  scale_x_continuous(breaks = min(yearly_sex_data$year):max(yearly_sex_data$year)) +
+  scale_color_manual(values=c("M"="blue", "F"="pink", "U"="orange", "All"="black")) +
+  labs(title="Fig.1: Historic Shooting Data", x="Year", y="Shooting Cases", color="Perpetrator Sex")
+
+
+
+
+
+```
+
+* After looking at the historic data, we choose to use the "Unknown" shooter case values from 2006-2012 as our model. The reasoning behind this is that both periods included economic and general instability, however the fall in the number of male shooter cases between 2006-2012 prevents us from being able to model the aggregate i.e the black line in fig.1 for the post-2018 period using simply the aggregate data from 2006-2012. 
+  + Now that we know what data to use, we begin by creating a multiplier matrix that can take the number of cases at 2017 as input and output predicted number of cases for each following year.
+
+```{r}
+
+pred_data <- all_yearly_sex_data %>%
+  filter(PERP_SEX == "U") 
+
+pred_data <- pred_data[-4, ]
+
+pred_data$predicted_values <- (pred_data$total_cases / pred_data$total_cases[1] * sum_cases_per_year$total_cases[12])
+
+pred_data$ratio <- (pred_data$total_cases / pred_data$total_cases[1])
+
+pred_data <- pred_data %>%
+  filter(year < 2013)
+
+new_years <- c(2017, 2018, 2019, 2020, 2021, 2022)
+
+pred_data$year <- new_years
+
+pred_data <- select(pred_data, c(year, predicted_values, ratio))
+
+ggplot(pred_data) +
+  aes(x=year, y=ratio, color="red")+
+  geom_point() +
+  geom_line()+
+  scale_x_continuous(breaks = min(pred_data$year):max(pred_data$year)) +
+  labs(title="Fig.2: Model Multipliers", x="Year", y="multiplier")
+
+```
+
+* Note that due to the severity of the COVID-19 pandemic, we slightly modified the model to have a sharper increase in the number of cases compared to the orange line in Fig.1
+
+* Now we apply the model to our historic data and plot the results against the actual data in Fig.3:
+
+```{r}
+test_data <- sum_cases_per_year %>%
+  filter(year > 2016)
+
+
+
+
+ggplot() +
+  geom_line(data = test_data, aes(x=year, y=total_cases, color="actual")) +
+  geom_line(data = pred_data, aes(x=year, y=predicted_values, color="Predicted")) +
+  scale_x_continuous(breaks = min(test_data$year):max(test_data$year)) +
+  scale_color_manual(values=c("Predicted"="purple", "actual"="black")) +
+  labs(title="Fig.3: Actual Shooting Data vs Predicted Values", x="Year", y="Total Cases", color="Data Source")
+
+
+
+```
+
+* We see that our model successfully predicts the number of cases per year with relatively small error. to put this into perspective, we add Fig.4 and demonstrate how our custom model compares to a standard linear model developed using the pre-2018 aggregate data.
+
+```{r}
+
+model <- lm(total_cases ~ year, data = analysis_data)
+
+lin_data <- data.frame(year = sum_cases_per_year$year)
+
+lin_data$total_cases <- predict(model, newdata = lin_data)
+
+ggplot() +
+  geom_line(data = pred_data, aes(x=year, y=predicted_values, color="custom model")) +
+  geom_line(data = sum_cases_per_year, aes(x=year, y=total_cases, color="actual")) +
+  geom_line(data = lin_data, aes(x=year, y=total_cases, color="linear model")) +
+  scale_x_continuous(breaks = min(sum_cases_per_year$year):max(sum_cases_per_year$year)) +
+  scale_color_manual(values=c("custom model"="purple", "linear model"="turquoise", "actual"="black")) +
+  labs(title="Fig.4: Complete Dataset With Linear and Custom Models", x="Year", y="Total Cases", color="Data")
+
+```
+
+* To quantize the performance of the models, Fig.5 shows the absolute value of the error of each model for every year reported as a percentage of the actual value:
+
+```{r}
+lin_data <- lin_data %>%
+  filter(year > 2016)
+
+error_data <- data.frame(year=test_data$year)
+error_data$linear <- abs((lin_data$total_cases- test_data$total_cases)/ 
+                           test_data$total_cases *100)
+error_data$custom <- abs((pred_data$predicted_values- test_data$total_cases)/ 
+                           test_data$total_cases *100)
+
+long_data <- error_data %>% 
+  pivot_longer(cols = -year, names_to = "Model", values_to = "value")
+
+ggplot(long_data, aes(x = year, y = value, fill = Model)) + 
+  geom_bar(stat = "identity", position = "dodge") +
+  scale_x_continuous(breaks = min(long_data$year):max(long_data$year)) +
+  scale_fill_manual(values=c("custom"="purple", "linear"="turquoise")) +
+  labs(title = "Fig.5: Model Errors",x = "Year",
+       y = "% error")
+
+
+```
+
+## Bias
+
+* Societal and Cultural Bias: This type of bias is related to the reasoning used for our 'custom' model.
+
+* Selection Bias: Relating to the cut off year for analysis and modeling validation. In this document 2017-18 is the cutoff.
+
+
+## Conclusion
+
+We successfully modeled and predicted an increase in shooting cases in new york between 2017-2022 using the "unknown" shooter data from 2006-2012. Figure 5 demonstrates that our model has at most roughly 11% error while a linear model exceeds 60%. From this, we cannot draw many concrete conclusions but this report shows that the unexpected increase in shooting cases after 2019 is in fact not far from the increase in 2008 in terms of scale and as a result, the increase after 2019 is roughly predictable.
+
+
+
+## session info
+```{r}
+sessionInfo()
+```
+
+
+
+
